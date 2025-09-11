@@ -454,7 +454,7 @@ def atualizar_formula(id: int, bruta: Optional[str] = None, normalizada: Optiona
 
         if bruta is not None:
             indicador.formula.bruta = bruta
-        if normalizada é not None:
+        if normalizada is not None:
             indicador.formula.normalizada = normalizada
         if hash is not None:
             indicador.formula.hash = hash
