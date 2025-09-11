@@ -1,16 +1,20 @@
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Body
 from typing import Optional, List
 from models import Municipio, Indicador, Formula, Subindicador, Condicao
-from database import create_db_and_tables
+from database import create_db_and_tables, get_session
 from sqlmodel import select
 from fastapi.responses import JSONResponse
-import json
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func
+import json
 
 app = FastAPI(
     title="API SIGI",
-    description="API do Sistema Inteligente de Gestão de Indicadores (SIGI), utilizada para armazenar, consultar e comparar indicadores de municípios com base em editais de iluminação pública.",
+    description=(
+        "API do Sistema Inteligente de Gestão de Indicadores (SIGI), "
+        "utilizada para armazenar, consultar e comparar indicadores de municípios "
+        "com base em editais de iluminação pública."
+    ),
     version="1.0.0",
 )
 
@@ -20,27 +24,43 @@ def on_startup():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=["*"],       # em produção, substitua pelo domínio do front
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- IMPORTAÇÃO DE INDICADORES VIA JSON COMPLETO ---
+# ----------------------------------------------------------------------
+# IMPORTAÇÃO DE INDICADORES
+# ----------------------------------------------------------------------
 
-@app.post("/indicadores/importar", tags=["Indicadores"], description="Importa um conjunto completo de indicadores a partir de um arquivo JSON estruturado.")
-async def importar_indicadores(file: UploadFile = File(...)):
+@app.post(
+    "/indicadores/importar",
+    tags=["Indicadores"],
+    description="Importa um conjunto completo de indicadores a partir de JSON (body) ou arquivo .json (campo 'file').",
+)
+async def importar_indicadores(
+    file: UploadFile | None = File(None),
+    payload: dict | None = Body(None)
+):
     try:
-        contents = await file.read()
-        data = json.loads(contents.decode("utf-8"))
+        # Permite enviar JSON direto no body ou arquivo via multipart.
+        if payload is not None:
+            data = payload
+        else:
+            if not file:
+                raise HTTPException(status_code=400, detail="Envie um arquivo .json (campo 'file') ou JSON no corpo da requisição.")
+            contents = await file.read()
+            data = json.loads(contents.decode("utf-8"))
 
         with get_session() as session:
+            # evita duplicar o mesmo conjunto (município/uf/edital/ano)
             existe = session.exec(
                 select(Municipio).where(
                     Municipio.municipio == data["municipio"],
                     Municipio.uf == data["uf"],
-                    Municipio.edital == data["edital"],
-                    Municipio.ano_edital == data["ano_edital"]
+                    Municipio.edital == data.get("edital"),
+                    Municipio.ano_edital == data.get("ano_edital"),
                 )
             ).first()
             if existe:
@@ -49,47 +69,51 @@ async def importar_indicadores(file: UploadFile = File(...)):
             municipio = Municipio(
                 municipio=data["municipio"],
                 uf=data["uf"],
-                edital=data["edital"],
-                ano_edital=data["ano_edital"]
+                edital=data.get("edital"),
+                ano_edital=data.get("ano_edital"),
             )
 
-            for i in data["indicadores"]:
+            for i in data.get("indicadores", []):
+                nome_ind = i.get("nome_indicador") or i.get("nome")
+                if not nome_ind:
+                    raise HTTPException(status_code=400, detail="Indicador sem 'nome_indicador'.")
+
                 indicador = Indicador(
-                    nome_indicador=i.get("nome_indicador") or i.get("nome"),
-                    descricao=i["descricao"],
+                    nome_indicador=nome_ind,
+                    descricao=i.get("descricao"),
                     unidade=i.get("unidade"),
                     tags=json.dumps(i.get("tags", [])),
                     observacoes=json.dumps(i.get("observacoes", [])),
-                    inconsistencias=json.dumps(i.get("inconsistencias", []))
+                    inconsistencias=json.dumps(i.get("inconsistencias", [])),
                 )
 
-                if "formula" in i:
+                if isinstance(i.get("formula"), dict):
                     indicador.formula = Formula(
                         bruta=i["formula"].get("bruta"),
                         normalizada=i["formula"].get("normalizada"),
-                        hash=i["formula"].get("hash")
+                        hash=i["formula"].get("hash"),
                     )
 
                 for sub in i.get("subindicadores", []):
-                    indicador.subindicadores.append(Subindicador(
-                        nome=sub["nome"],
-                        descricao=sub["descricao"]
-                    ))
+                    indicador.subindicadores.append(
+                        Subindicador(
+                            nome=sub.get("nome"),
+                            descricao=sub.get("descricao"),
+                        )
+                    )
 
                 condicoes_raw = i.get("condicoes", [])
                 if isinstance(condicoes_raw, list):
                     for cond in condicoes_raw:
-                        indicador.condicoes.append(Condicao(
-                            regra=cond["regra"],
-                            nota=cond.get("nota")
-                        ))
+                        indicador.condicoes.append(
+                            Condicao(regra=cond.get("regra"), nota=cond.get("nota"))
+                        )
                 elif isinstance(condicoes_raw, dict):
                     for grupo in condicoes_raw.values():
                         for cond in grupo:
-                            indicador.condicoes.append(Condicao(
-                                regra=cond["regra"],
-                                nota=cond.get("nota")
-                            ))
+                            indicador.condicoes.append(
+                                Condicao(regra=cond.get("regra"), nota=cond.get("nota"))
+                            )
 
                 municipio.indicadores.append(indicador)
 
@@ -103,7 +127,8 @@ async def importar_indicadores(file: UploadFile = File(...)):
                 "municipio": municipio.municipio,
                 "uf": municipio.uf,
                 "edital": municipio.edital,
-                "ano_edital": municipio.ano_edital
+                "ano_edital": municipio.ano_edital,
+                "total_indicadores": len(municipio.indicadores),
             }
 
     except json.JSONDecodeError:
@@ -113,10 +138,16 @@ async def importar_indicadores(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao importar os indicadores: {str(e)}")
 
+# ----------------------------------------------------------------------
+# LISTAGEM / CONSULTAS
+# ----------------------------------------------------------------------
 
-# --- OPERAÇÕES SOBRE CONJUNTOS DE INDICADORES ---
-
-@app.get("/indicadores", response_model=List[Municipio], tags=["Indicadores"], description="Lista todos os conjuntos de indicadores, com filtros opcionais por nome, UF, edital e ano.")
+@app.get(
+    "/indicadores",
+    response_model=List[Municipio],
+    tags=["Indicadores"],
+    description="Lista todos os conjuntos de indicadores, com filtros opcionais por nome, UF, edital e ano.",
+)
 def listar_indicadores(
     municipio: Optional[str] = Query(None),
     uf: Optional[str] = Query(None),
@@ -149,10 +180,12 @@ def listar_indicadores(
             )
 
         return resultado
-    
-# --- COMPARAÇÃO DE INDICADORES ---
 
-@app.get("/indicadores/comparar", tags=["Indicadores"], description="Compara indicadores por nome (semelhança), fórmula ou hash (iguais). Apenas um critério por vez.")
+@app.get(
+    "/indicadores/comparar",
+    tags=["Indicadores"],
+    description="Compara indicadores por nome (semelhança), fórmula ou hash (iguais). Apenas um critério por vez."
+)
 def comparar_indicadores(
     nome: Optional[str] = None,
     formula: Optional[str] = None,
@@ -219,7 +252,11 @@ def comparar_indicadores(
 
         return equivalentes
 
-@app.get("/indicadores/semelhantes", tags=["Indicadores"], description="Retorna grupos de indicadores semelhantes com base em hash ou fórmula normalizada.")
+@app.get(
+    "/indicadores/semelhantes",
+    tags=["Indicadores"],
+    description="Retorna grupos de indicadores semelhantes com base em hash ou fórmula normalizada."
+)
 def indicadores_semelhantes(criterio: str = Query(..., enum=["hash", "formula"])):
     try:
         with get_session() as session:
@@ -277,10 +314,11 @@ def indicadores_semelhantes(criterio: str = Query(..., enum=["hash", "formula"])
         print("Erro ao buscar indicadores semelhantes:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-
-
-
-@app.get("/indicadores/por-municipio", tags=["Indicadores"], description="Retorna todos os indicadores de um município informado (busca parcial e case-insensitive).")
+@app.get(
+    "/indicadores/por-municipio",
+    tags=["Indicadores"],
+    description="Retorna todos os indicadores de um município informado (busca parcial e case-insensitive)."
+)
 def indicadores_por_municipio(nome: str = Query(..., description="Nome (ou parte do nome) do município")):
     with get_session() as session:
         municipio = session.exec(
@@ -322,9 +360,17 @@ def indicadores_por_municipio(nome: str = Query(..., description="Nome (ou parte
             "total_indicadores": len(resultado),
             "indicadores": resultado
         }
- 
 
-@app.get("/indicadores/{id}", response_model=Municipio, tags=["Indicadores"], description="Retorna um conjunto de indicadores por ID.")
+# ----------------------------------------------------------------------
+# CRUD BÁSICO
+# ----------------------------------------------------------------------
+
+@app.get(
+    "/indicadores/{id}",
+    response_model=Municipio,
+    tags=["Indicadores"],
+    description="Retorna um conjunto de indicadores por ID."
+)
 def obter_indicador(id: int):
     with get_session() as session:
         m = session.get(Municipio, id)
@@ -332,8 +378,12 @@ def obter_indicador(id: int):
             raise HTTPException(status_code=404, detail="Não encontrado")
         return m
 
-
-@app.put("/indicadores/{id}", response_model=Municipio, tags=["Indicadores"], description="Atualiza completamente um conjunto de indicadores existente.")
+@app.put(
+    "/indicadores/{id}",
+    response_model=Municipio,
+    tags=["Indicadores"],
+    description="Atualiza completamente um conjunto de indicadores existente."
+)
 def atualizar_indicador(id: int, dados: Municipio):
     with get_session() as session:
         m = session.get(Municipio, id)
@@ -349,7 +399,11 @@ def atualizar_indicador(id: int, dados: Municipio):
             "dados_atualizados": dados
         }
 
-@app.delete("/indicadores/{id}", tags=["Indicadores"], description="Remove um conjunto completo de indicadores pelo ID.")
+@app.delete(
+    "/indicadores/{id}",
+    tags=["Indicadores"],
+    description="Remove um conjunto completo de indicadores pelo ID."
+)
 def excluir_indicador(id: int):
     with get_session() as session:
         m = session.get(Municipio, id)
@@ -363,7 +417,11 @@ def excluir_indicador(id: int):
             "mensagem": f"Indicador '{nome}' (ID {id}) deletado com sucesso."
         }
 
-@app.delete("/indicadores", tags=["Indicadores"], description="Exclui todos os conjuntos de indicadores. CUIDADO: essa operação é irreversível.")
+@app.delete(
+    "/indicadores",
+    tags=["Indicadores"],
+    description="Exclui todos os conjuntos de indicadores. CUIDADO: essa operação é irreversível."
+)
 def excluir_todos_indicadores():
     with get_session() as session:
         municipios = session.exec(select(Municipio)).all()
@@ -378,10 +436,15 @@ def excluir_todos_indicadores():
             "mensagem": f"Todos os {total} conjuntos de indicadores foram deletados com sucesso."
         }
 
+# ----------------------------------------------------------------------
+# EDIÇÃO DE ATRIBUTOS
+# ----------------------------------------------------------------------
 
-# --- EDIÇÃO DE DADOS INDIVIDUAIS ---
-
-@app.patch("/indicadores/{id}/formula", tags=["Indicadores"], description="Atualiza parcialmente a fórmula (bruta, normalizada e hash) de um indicador.")
+@app.patch(
+    "/indicadores/{id}/formula",
+    tags=["Indicadores"],
+    description="Atualiza parcialmente a fórmula (bruta, normalizada e hash) de um indicador."
+)
 def atualizar_formula(id: int, bruta: Optional[str] = None, normalizada: Optional[str] = None, hash: Optional[str] = None):
     with get_session() as session:
         indicador = session.get(Indicador, id)
@@ -404,7 +467,11 @@ def atualizar_formula(id: int, bruta: Optional[str] = None, normalizada: Optiona
             "mensagem": f"Fórmula do indicador '{indicador.nome_indicador}' (ID {indicador.id}) atualizada com sucesso."
         }
 
-@app.put("/indicadores/{id}/tags", tags=["Indicadores"], description="Substitui completamente a lista de tags de um indicador.")
+@app.put(
+    "/indicadores/{id}/tags",
+    tags=["Indicadores"],
+    description="Substitui completamente a lista de tags de um indicador."
+)
 def atualizar_tags(id: int, tags: List[str]):
     with get_session() as session:
         indicador = session.get(Indicador, id)
@@ -421,7 +488,11 @@ def atualizar_tags(id: int, tags: List[str]):
             "tags_aplicadas": tags
         }
 
-@app.get("/indicadores/exportar/{id}", tags=["Indicadores"], description="Exporta um conjunto de indicadores completo em formato JSON estruturado.")
+@app.get(
+    "/indicadores/exportar/{id}",
+    tags=["Indicadores"],
+    description="Exporta um conjunto de indicadores completo em formato JSON estruturado."
+)
 def exportar_indicadores(id: int):
     with get_session() as session:
         municipio = session.get(Municipio, id)
@@ -465,5 +536,3 @@ def exportar_indicadores(id: int):
         }
 
         return JSONResponse(content=resultado)
-    
-
