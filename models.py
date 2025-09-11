@@ -21,19 +21,6 @@ class Municipio(SQLModel, table=True):
 
 
 # -----------------------------
-# FORMULA (opcional por indicador)
-# -----------------------------
-class Formula(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    bruta: Optional[str] = None
-    normalizada: Optional[str] = None
-    hash: Optional[str] = None
-
-    # relação inversa 1:1 ou 1:N (conforme seu uso)
-    indicador: Optional["Indicador"] = Relationship(back_populates="formula")
-
-
-# -----------------------------
 # INDICADOR
 # -----------------------------
 class Indicador(SQLModel, table=True):
@@ -51,9 +38,11 @@ class Indicador(SQLModel, table=True):
     observacoes: Optional[str] = None
     inconsistencias: Optional[str] = None
 
-    # relação com fórmula (FK em Indicador)
-    formula_id: Optional[int] = Field(default=None, foreign_key="formula.id")
-    formula: Optional["Formula"] = Relationship(back_populates="indicador")
+    # 1:1 Indicador -> Formula (FK fica em Formula)
+    formula: Optional["Formula"] = Relationship(
+        back_populates="indicador",
+        sa_relationship_kwargs={"uselist": False},
+    )
 
     # 1:N Indicador -> Subindicadores / Condicoes
     subindicadores: List["Subindicador"] = Relationship(
@@ -64,6 +53,21 @@ class Indicador(SQLModel, table=True):
         back_populates="indicador",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
+
+
+# -----------------------------
+# FORMULA (FK obrigatório para Indicador)
+# -----------------------------
+class Formula(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+    # IMPORTANTE: seu banco tem esta coluna NOT NULL
+    indicador_id: int = Field(foreign_key="indicador.id")
+    indicador: "Indicador" = Relationship(back_populates="formula")
+
+    bruta: Optional[str] = None
+    normalizada: Optional[str] = None
+    hash: Optional[str] = None
 
 
 # -----------------------------
