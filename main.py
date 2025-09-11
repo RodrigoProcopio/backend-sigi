@@ -82,9 +82,9 @@ async def importar_indicadores(
                     nome_indicador=nome_ind,
                     descricao=i.get("descricao"),
                     unidade=i.get("unidade"),
-                    tags=json.dumps(i.get("tags", [])),
-                    observacoes=json.dumps(i.get("observacoes", [])),
-                    inconsistencias=json.dumps(i.get("inconsistencias", [])),
+                    tags=i.get("tags", []),
+                    observacoes=i.get("observacoes", []),
+                    inconsistencias=i.get("inconsistencias", []),
                 )
 
                 if isinstance(i.get("formula"), dict):
@@ -228,9 +228,10 @@ def comparar_indicadores(
                         "nome_indicador": i.nome_indicador,
                         "descricao": i.descricao,
                         "unidade": i.unidade,
-                        "tags": json.loads(i.tags or "[]"),
-                        "observacoes": json.loads(i.observacoes or "[]"),
-                        "inconsistencias": json.loads(i.inconsistencias or "[]"),
+                        "tags": i.tags or [],
+                        "observacoes": i.observacoes or [],
+                        "inconsistencias": i.inconsistencias or [],
+
                         "formula": {
                             "bruta": i.formula.bruta if i.formula else None,
                             "normalizada": i.formula.normalizada if i.formula else None,
@@ -288,11 +289,9 @@ def indicadores_semelhantes(criterio: str = Query(..., enum=["hash", "formula"])
                 if chave not in grupos:
                     grupos[chave] = []
 
-                indicadores = session.exec(
-                    select(Indicador).where(Indicador.formula == formula)
-                ).all()
-
-                for ind in indicadores:
+                # 1:1 - pega o indicador pelo FK da fórmula
+                ind = session.get(Indicador, formula.indicador_id)
+                if ind:
                     m = session.get(Municipio, ind.municipio_id)
                     session.refresh(ind, attribute_names=["subindicadores", "condicoes"])
                     grupos[chave].append({
@@ -338,9 +337,9 @@ def indicadores_por_municipio(nome: str = Query(..., description="Nome (ou parte
                 "nome_indicador": i.nome_indicador,
                 "descricao": i.descricao,
                 "unidade": i.unidade,
-                "tags": json.loads(i.tags or "[]"),
-                "observacoes": json.loads(i.observacoes or "[]"),
-                "inconsistencias": json.loads(i.inconsistencias or "[]"),
+                "tags": i.tags or [],
+                "observacoes": i.observacoes or [],
+                "inconsistencias": i.inconsistencias or [],
                 "formula": {
                     "bruta": i.formula.bruta if i.formula else None,
                     "normalizada": i.formula.normalizada if i.formula else None,
@@ -455,7 +454,7 @@ def atualizar_formula(id: int, bruta: Optional[str] = None, normalizada: Optiona
 
         if bruta is not None:
             indicador.formula.bruta = bruta
-        if normalizada is not None:
+        if normalizada é not None:
             indicador.formula.normalizada = normalizada
         if hash is not None:
             indicador.formula.hash = hash
@@ -478,7 +477,8 @@ def atualizar_tags(id: int, tags: List[str]):
         if not indicador:
             raise HTTPException(status_code=404, detail=f"Indicador com ID {id} não encontrado.")
 
-        indicador.tags = json.dumps(tags)
+        # agora é JSON no Postgres: atribuir lista Python diretamente
+        indicador.tags = tags
         session.add(indicador)
         session.commit()
 
@@ -509,9 +509,9 @@ def exportar_indicadores(id: int):
                 "nome_indicador": indicador.nome_indicador,
                 "descricao": indicador.descricao,
                 "unidade": indicador.unidade,
-                "tags": json.loads(indicador.tags or "[]"),
-                "observacoes": json.loads(indicador.observacoes or "[]"),
-                "inconsistencias": json.loads(indicador.inconsistencias or "[]"),
+                "tags": indicador.tags or [],
+                "observacoes": indicador.observacoes or [],
+                "inconsistencias": indicador.inconsistencias or [],
                 "formula": {
                     "bruta": indicador.formula.bruta if indicador.formula else None,
                     "normalizada": indicador.formula.normalizada if indicador.formula else None,
