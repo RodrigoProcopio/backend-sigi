@@ -5,7 +5,7 @@ from database import create_db_and_tables, get_session
 from sqlmodel import select
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func
+from sqlalchemy import func, delete
 import json
 
 app = FastAPI(
@@ -423,16 +423,17 @@ def excluir_indicador(id: int):
 )
 def excluir_todos_indicadores():
     with get_session() as session:
-        municipios = session.exec(select(Municipio)).all()
-        total = len(municipios)
-        if total == 0:
-            return {"status": "nenhuma ação", "mensagem": "Nenhum conjunto de indicadores encontrado para exclusão."}
-        for m in municipios:
-            session.delete(m)
+        # deletar filhos primeiro para não quebrar FKs
+        session.exec(delete(Condicao))
+        session.exec(delete(Subindicador))
+        session.exec(delete(Formula))
+        session.exec(delete(Indicador))
+        # por último os municípios
+        session.exec(delete(Municipio))
         session.commit()
         return {
             "status": "sucesso",
-            "mensagem": f"Todos os {total} conjuntos de indicadores foram deletados com sucesso."
+            "mensagem": "Todos os conjuntos de indicadores foram deletados com sucesso."
         }
 
 # ----------------------------------------------------------------------
