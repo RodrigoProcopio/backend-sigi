@@ -31,108 +31,118 @@ app.add_middleware(
 )
 
 # ----------------------------------------------------------------------
-# IMPORTAÇÃO DE INDICADORES
+# Helper reutilizável para importar a estrutura já carregada em 'data'
 # ----------------------------------------------------------------------
-
-@app.post(
-    "/indicadores/importar",
-    tags=["Indicadores"],
-    description="Importa um conjunto completo de indicadores a partir de JSON (body) ou arquivo .json (campo 'file').",
-)
-async def importar_indicadores(
-    file: UploadFile | None = File(None),
-    payload: dict | None = Body(None)
-):
-    try:
-        # Permite enviar JSON direto no body ou arquivo via multipart.
-        if payload is not None:
-            data = payload
-        else:
-            if not file:
-                raise HTTPException(status_code=400, detail="Envie um arquivo .json (campo 'file') ou JSON no corpo da requisição.")
-            contents = await file.read()
-            data = json.loads(contents.decode("utf-8"))
-
-        with get_session() as session:
-            # evita duplicar o mesmo conjunto (município/uf/edital/ano)
-            existe = session.exec(
-                select(Municipio).where(
-                    Municipio.municipio == data["municipio"],
-                    Municipio.uf == data["uf"],
-                    Municipio.edital == data.get("edital"),
-                    Municipio.ano_edital == data.get("ano_edital"),
-                )
-            ).first()
-            if existe:
-                raise HTTPException(status_code=400, detail="Este conjunto de indicadores já foi importado para este município.")
-
-            municipio = Municipio(
-                municipio=data["municipio"],
-                uf=data["uf"],
-                edital=data.get("edital"),
-                ano_edital=data.get("ano_edital"),
+def _importar_do_dict(data: dict):
+    with get_session() as session:
+        # evita duplicidade do mesmo conjunto
+        existe = session.exec(
+            select(Municipio).where(
+                Municipio.municipio == data["municipio"],
+                Municipio.uf == data["uf"],
+                Municipio.edital == data.get("edital"),
+                Municipio.ano_edital == data.get("ano_edital"),
+            )
+        ).first()
+        if existe:
+            raise HTTPException(
+                status_code=400,
+                detail="Este conjunto de indicadores já foi importado para este município."
             )
 
-            for i in data.get("indicadores", []):
-                nome_ind = i.get("nome_indicador") or i.get("nome")
-                if not nome_ind:
-                    raise HTTPException(status_code=400, detail="Indicador sem 'nome_indicador'.")
+        municipio = Municipio(
+            municipio=data["municipio"],
+            uf=data["uf"],
+            edital=data.get("edital"),
+            ano_edital=data.get("ano_edital"),
+        )
 
-                indicador = Indicador(
-                    nome_indicador=nome_ind,
-                    descricao=i.get("descricao"),
-                    unidade=i.get("unidade"),
-                    tags=i.get("tags", []),
-                    observacoes=i.get("observacoes", []),
-                    inconsistencias=i.get("inconsistencias", []),
+        for i in data.get("indicadores", []):
+            nome_ind = i.get("nome_indicador") or i.get("nome")
+            if not nome_ind:
+                raise HTTPException(status_code=400, detail="Indicador sem 'nome_indicador'.")
+
+            indicador = Indicador(
+                nome_indicador=nome_ind,
+                descricao=i.get("descricao"),
+                unidade=i.get("unidade"),
+                tags=i.get("tags", []) or [],
+                observacoes=i.get("observacoes", []) or [],
+                inconsistencias=i.get("inconsistencias", []) or [],
+            )
+
+            if isinstance(i.get("formula"), dict):
+                indicador.formula = Formula(
+                    bruta=i["formula"].get("bruta"),
+                    normalizada=i["formula"].get("normalizada"),
+                    hash=i["formula"].get("hash"),
                 )
 
-                if isinstance(i.get("formula"), dict):
-                    indicador.formula = Formula(
-                        bruta=i["formula"].get("bruta"),
-                        normalizada=i["formula"].get("normalizada"),
-                        hash=i["formula"].get("hash"),
-                    )
+            for sub in i.get("subindicadores", []) or []:
+                indicador.subindicadores.append(
+                    Subindicador(nome=sub.get("nome"), descricao=sub.get("descricao"))
+                )
 
-                for sub in i.get("subindicadores", []):
-                    indicador.subindicadores.append(
-                        Subindicador(
-                            nome=sub.get("nome"),
-                            descricao=sub.get("descricao"),
-                        )
+            condicoes_raw = i.get("condicoes", [])
+            if isinstance(condicoes_raw, list):
+                for cond in condicoes_raw:
+                    indicador.condicoes.append(
+                        Condicao(regra=cond.get("regra"), nota=cond.get("nota"))
                     )
-
-                condicoes_raw = i.get("condicoes", [])
-                if isinstance(condicoes_raw, list):
-                    for cond in condicoes_raw:
+            elif isinstance(condicoes_raw, dict):
+                for grupo in condicoes_raw.values():
+                    for cond in grupo:
                         indicador.condicoes.append(
                             Condicao(regra=cond.get("regra"), nota=cond.get("nota"))
                         )
-                elif isinstance(condicoes_raw, dict):
-                    for grupo in condicoes_raw.values():
-                        for cond in grupo:
-                            indicador.condicoes.append(
-                                Condicao(regra=cond.get("regra"), nota=cond.get("nota"))
-                            )
 
-                municipio.indicadores.append(indicador)
+            municipio.indicadores.append(indicador)
 
-            session.add(municipio)
-            session.commit()
-            session.refresh(municipio)
+        session.add(municipio)
+        session.commit()
+        session.refresh(municipio)
 
-            return {
-                "status": "sucesso",
-                "mensagem": "Indicadores importados com sucesso.",
-                "municipio": municipio.municipio,
-                "uf": municipio.uf,
-                "edital": municipio.edital,
-                "ano_edital": municipio.ano_edital,
-                "total_indicadores": len(municipio.indicadores),
-            }
+        return {
+            "status": "sucesso",
+            "mensagem": "Indicadores importados com sucesso.",
+            "municipio": municipio.municipio,
+            "uf": municipio.uf,
+            "edital": municipio.edital,
+            "ano_edital": municipio.ano_edital,
+            "total_indicadores": len(municipio.indicadores),
+        }
 
+# ----------------------------------------------------------------------
+# IMPORTAÇÃO — duas rotas separadas (upload e JSON)
+# ----------------------------------------------------------------------
+
+# A) Upload de arquivo .json (aparece o botão de upload no Swagger)
+@app.post(
+    "/indicadores/importar-arquivo",
+    tags=["Indicadores"],
+    description="Importa indicadores a partir de um arquivo .json (multipart/form-data, campo 'file').",
+)
+async def importar_indicadores_arquivo(file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        data = json.loads(contents.decode("utf-8"))
+        return _importar_do_dict(data)
     except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="O arquivo não está em formato JSON válido ou está malformado.")
+        raise HTTPException(status_code=400, detail="O arquivo não está em JSON válido.")
+    except KeyError as e:
+        raise HTTPException(status_code=400, detail=f"Campo obrigatório ausente no JSON: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao importar os indicadores: {str(e)}")
+
+# B) JSON direto no corpo (application/json)
+@app.post(
+    "/indicadores/importar",
+    tags=["Indicadores"],
+    description="Importa indicadores enviando JSON no corpo (Content-Type: application/json).",
+)
+async def importar_indicadores_json(payload: dict = Body(...)):
+    try:
+        return _importar_do_dict(payload)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=f"Campo obrigatório ausente no JSON: {str(e)}")
     except Exception as e:
@@ -289,7 +299,7 @@ def indicadores_semelhantes(criterio: str = Query(..., enum=["hash", "formula"])
                 if chave not in grupos:
                     grupos[chave] = []
 
-                # 1:1 - pega o indicador pelo FK da fórmula
+                # relação 1:1 — pega o indicador pelo FK da fórmula
                 ind = session.get(Indicador, formula.indicador_id)
                 if ind:
                     m = session.get(Municipio, ind.municipio_id)
